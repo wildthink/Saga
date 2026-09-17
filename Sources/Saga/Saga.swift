@@ -55,9 +55,12 @@ public class Saga: StepBuilder, @unchecked Sendable {
   /// Why the current build was triggered.
   public internal(set) var buildReason: BuildReason = .initial
 
-  public init(input: Path, output: Path = "deploy", fileIO: FileIO = .diskAccess, originFilePath: StaticString = #filePath) throws {
+  /// An explicit root bypasses source-package discovery, allowing installed tools
+  /// to run after their original source checkout has moved or been removed.
+  /// Input and output are resolved against this root; absolute paths stay absolute.
+  public init(input: Path, output: Path = "deploy", fileIO: FileIO = .diskAccess, originFilePath: StaticString = #filePath, root: Path? = nil) throws {
     let originFile = Path("\(originFilePath)")
-    let rootPath = try fileIO.resolveSwiftPackageFolder(originFile)
+    let rootPath = try root ?? fileIO.resolveSwiftPackageFolder(originFile)
 
     self.rootPath = rootPath
     inputPath = self.rootPath + input
