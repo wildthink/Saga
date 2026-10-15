@@ -871,6 +871,42 @@ final class SagaTests: XCTestCase, @unchecked Sendable {
     XCTAssertTrue(customFeed.contains("<title>Test Site</title>"), "The feed-level title is unaffected.")
   }
 
+  func testAtomFeedIsDeterministic() throws {
+    let older = Date(timeIntervalSince1970: 1_704_106_800) // 2024-01-01T11:00:00Z
+    let newer = Date(timeIntervalSince1970: 1_706_785_200) // 2024-02-01T11:00:00Z
+    let context = FeedContext(
+      items: [
+        Item(title: "Newer", body: "<p>b</p>", date: newer, metadata: EmptyMetadata()),
+        Item(title: "Older", body: "<p>a</p>", date: older, metadata: EmptyMetadata()),
+      ],
+      outputPath: "feed.xml"
+    )
+    let render = {
+      Saga.atomFeed(
+        title: "Test Site",
+        baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+        image: { _ in "cover.png" }
+      )(context)
+    }
+
+    // Unchanged content renders to the same bytes, so a digest-comparing
+    // deploy does not re-send the feed on every build.
+    let first = try render()
+    Thread.sleep(forTimeInterval: 1.1) // cross a second boundary, as two builds would
+    let second = try render()
+    XCTAssertEqual(Data(first.utf8), Data(second.utf8))
+
+    // The feed's <updated> is its newest entry's date, not the build time.
+    let feedHead = try XCTUnwrap(first.components(separatedBy: "<entry>").first)
+    XCTAssertTrue(feedHead.contains("<updated>2024-02-01T11:00:00Z</updated>"), feedHead)
+
+    // Namespaces and attributes come out in a fixed order. A Dictionary's order
+    // is seeded per process, so equality within one run cannot catch that.
+    XCTAssertTrue(first.contains(#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">"#), first)
+    XCTAssertTrue(first.contains(#"<link rel="self" href="https://example.com/feed.xml">"#), first)
+    XCTAssertTrue(first.contains(#"<media:content url="https://example.com/cover.png" medium="image">"#), first)
+  }
+
   func testFilesCreatedDuringTheBuildAreRead() async throws {
     let writtenPages = Recorder<WrittenPage>()
     let disk = Recorder<Path>()

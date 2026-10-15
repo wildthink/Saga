@@ -34,10 +34,11 @@ public extension Saga {
 
       // Create the root element
       let rootElement = XMLElement(name: "feed")
-      rootElement.setAttributesWith([
-        "xmlns": "http://www.w3.org/2005/Atom",
-        "xmlns:media": "http://search.yahoo.com/mrss/",
-      ])
+      // Namespaces and attributes are added in sequence rather than from a
+      // Dictionary, whose order changes between runs and would make the
+      // feed differ byte-for-byte on every build of unchanged content.
+      rootElement.addNamespace(XMLNode.namespace(withName: "", stringValue: "http://www.w3.org/2005/Atom") as! XMLNode)
+      rootElement.addNamespace(XMLNode.namespace(withName: "media", stringValue: "http://search.yahoo.com/mrss/") as! XMLNode)
 
       // Create the XML document
       let XML = XMLDocument(rootElement: rootElement)
@@ -55,10 +56,13 @@ public extension Saga {
       }
 
       let linkElement = XMLElement(name: "link")
-      linkElement.setAttributesWith(["rel": "self", "href": baseURL.appendingPathComponent(feedPath).absoluteString])
+      setAttributes(linkElement, [("rel", "self"), ("href", baseURL.appendingPathComponent(feedPath).absoluteString)])
       rootElement.addChild(linkElement)
 
-      let updatedElement = XMLElement(name: "updated", stringValue: RFC3339_DF.string(from: Date()))
+      // The feed changed when its newest entry did. Using the build time
+      // here would rewrite the file on every build of unchanged content.
+      let latest = context.items.map { $0[keyPath: dateKeyPath] }.max() ?? Date(timeIntervalSince1970: 0)
+      let updatedElement = XMLElement(name: "updated", stringValue: RFC3339_DF.string(from: latest))
       rootElement.addChild(updatedElement)
 
       // add entries to feed
@@ -79,11 +83,11 @@ public extension Saga {
         }
 
         let contentElement = XMLElement(name: "content", stringValue: item.body)
-        contentElement.setAttributesWith(["type": "html"])
+        setAttributes(contentElement, [("type", "html")])
         entryElement.addChild(contentElement)
 
         let alternateElement = XMLElement(name: "link")
-        alternateElement.setAttributesWith(["rel": "alternate", "href": baseURL.appendingPathComponent(item.url).absoluteString])
+        setAttributes(alternateElement, [("rel", "alternate"), ("href", baseURL.appendingPathComponent(item.url).absoluteString)])
         entryElement.addChild(alternateElement)
 
         if let image, let imagePath = image(item) {
@@ -91,7 +95,7 @@ public extension Saga {
             ? imagePath
             : baseURL.appendingPathComponent(imagePath).absoluteString
           let imageElement = XMLElement(name: "media:content")
-          imageElement.setAttributesWith(["url": absoluteImageURL, "medium": "image"])
+          setAttributes(imageElement, [("url", absoluteImageURL), ("medium", "image")])
           entryElement.addChild(imageElement)
         }
 
@@ -101,4 +105,9 @@ public extension Saga {
       return String(data: XML.xmlData(options: [.nodePrettyPrint]), encoding: .utf8) ?? ""
     }
   }
+}
+
+/// Sets `attributes` on `element` in the order given.
+private func setAttributes(_ element: XMLElement, _ attributes: [(String, String)]) {
+  element.attributes = attributes.map { XMLNode.attribute(withName: $0.0, stringValue: $0.1) as! XMLNode }
 }
