@@ -360,6 +360,47 @@ final class SagaTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(decoded.url, URL(string: "https://www.example.com"))
   }
 
+  func testMetadataDecoderDateFormats() throws {
+    func date(_ hour: Int = 0, _ minute: Int = 0, _ second: Int = 0, nanosecond: Int = 0, zone: TimeZone = .current) -> Date {
+      var calendar = Calendar(identifier: .gregorian)
+      calendar.timeZone = zone
+      return calendar.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: hour, minute: minute, second: second, nanosecond: nanosecond))!
+    }
+
+    let plus2 = try XCTUnwrap(TimeZone(secondsFromGMT: 7200))
+    let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+
+    let cases: [(String, Date)] = [
+      ("2026-10-22", date()),
+      ("2026-10-22 12:07", date(12, 7)),
+      ("2026-10-22 12:07:31", date(12, 7, 31)),
+      ("2026-10-22T12:07", date(12, 7)),
+      ("2026-10-22T12:07:31", date(12, 7, 31)),
+      ("2026-10-22T12:07:31.250", date(12, 7, 31, nanosecond: 250_000_000)),
+      ("2026-10-22T12:07:31Z", date(12, 7, 31, zone: utc)),
+      ("2026-10-22T12:07:31+02:00", date(12, 7, 31, zone: plus2)),
+      ("2026-10-22T12:07:31.250+02:00", date(12, 7, 31, nanosecond: 250_000_000, zone: plus2)),
+      ("2026-10-22 12:07:31+02:00", date(12, 7, 31, zone: plus2)),
+      ("2026-10-22 12:07+0200", date(12, 7, zone: plus2)),
+      ("2026-10-22 12:07 +02:00", date(12, 7, zone: plus2)),
+      (" 2026-10-22 12:07 ", date(12, 7)),
+    ]
+
+    for (string, expected) in cases {
+      let decoded = try XCTUnwrap(resolveDate(from: makeMetadataDecoder(for: ["date": string])), string)
+      XCTAssertEqual(decoded.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 0.001, string)
+
+      // The order of the formats must not matter: every format that matches has to produce the same date
+      let trimmed = string.trimmingCharacters(in: .whitespaces)
+      let matches = Set(supportedDateFormatters.compactMap { $0.date(from: trimmed) })
+      XCTAssertEqual(matches, [decoded], string)
+    }
+
+    for string in ["22-10-2026", "2026-10-22 25:00", "yesterday", "2026-10-22 12"] {
+      XCTAssertThrowsError(try resolveDate(from: makeMetadataDecoder(for: ["date": string])), string)
+    }
+  }
+
   func testSlugified() {
     XCTAssertEqual("one two".slugified, "one-two")
     XCTAssertEqual("one - two".slugified, "one-two")
@@ -521,6 +562,41 @@ final class SagaTests: XCTestCase, @unchecked Sendable {
       .run()
 
     XCTAssertEqual(writtenPages.values, [WrittenPage(destination: "root/output/search/index.html", content: "search/index.html")])
+  }
+
+  func testCreatePageWithLeadingSlash() async throws {
+    let writtenPages = Recorder<WrittenPage>()
+
+    var mock = FileIO.mock
+    mock.findFiles = { _ in [] }
+    mock.write = writtenPages.record
+
+    try await Saga(input: "input", output: "output", fileIO: mock)
+      .createPage("/feeds/index.html") { context in
+        "\(context.outputPath)"
+      }
+      .run()
+
+    XCTAssertEqual(writtenPages.values, [WrittenPage(destination: "root/output/feeds/index.html", content: "feeds/index.html")])
+  }
+
+  func testListWriterWithLeadingSlash() async throws {
+    let writtenPages = Recorder<WrittenPage>()
+
+    var mock = FileIO.mock
+    mock.write = writtenPages.record
+
+    try await Saga(input: "input", output: "output", fileIO: mock)
+      .register(
+        metadata: EmptyMetadata.self,
+        readers: [.mock(frontmatter: [:])],
+        writers: [
+          .listWriter({ context in "\(context.outputPath)" }, output: "/list.html"),
+        ]
+      )
+      .run()
+
+    XCTAssertEqual(writtenPages.values, [WrittenPage(destination: "root/output/list.html", content: "list.html")])
   }
 
   func testHash() async throws {
@@ -905,6 +981,94 @@ final class SagaTests: XCTestCase, @unchecked Sendable {
     XCTAssertTrue(first.contains(#"<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">"#), first)
     XCTAssertTrue(first.contains(#"<link rel="self" href="https://example.com/feed.xml">"#), first)
     XCTAssertTrue(first.contains(#"<media:content url="https://example.com/cover.png" medium="image">"#), first)
+  }
+
+  func testAtomFeedDate() throws {
+    let context = FeedContext(
+      items: [
+        Item(title: "Title", body: "<p>body</p>", date: Date(timeIntervalSince1970: 1_704_106_800), metadata: EmptyMetadata()),
+      ],
+      outputPath: "feed.xml"
+    )
+
+    let feed = Saga.atomFeed(
+      title: "Test Site",
+      baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+      date: { $0.date.addingTimeInterval(3600) }
+    )(context)
+    XCTAssertTrue(feed.contains("<updated>2024-01-01T12:00:00Z</updated>"))
+  }
+
+  func testAtomFeedLimit() throws {
+    let items = [
+      Item(title: "New", body: "<p>new</p>", date: Date(timeIntervalSince1970: 1_735_729_200), metadata: EmptyMetadata()),
+      Item(title: "Middle", body: "<p>middle</p>", date: Date(timeIntervalSince1970: 1_720_000_000), metadata: EmptyMetadata()),
+      Item(title: "Old", body: "<p>old</p>", date: Date(timeIntervalSince1970: 1_704_106_800), metadata: EmptyMetadata()),
+    ]
+
+    func entryCount(_ feed: String) -> Int {
+      feed.components(separatedBy: "<entry>").count - 1
+    }
+
+    let feed = Saga.atomFeed(
+      title: "Test Site",
+      baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+      limit: 2
+    )(FeedContext(items: items, outputPath: "feed.xml"))
+    XCTAssertEqual(entryCount(feed), 2)
+    XCTAssertFalse(feed.contains("<title>Old</title>"))
+
+    // The limit applies after sorting, so the oldest item is the one left out.
+    let mixedFeed = Saga.atomFeed(
+      title: "Test Site",
+      baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+      filter: { _ in true },
+      limit: 2,
+      date: \.date
+    )(PageRenderingContext(allItems: items.reversed(), outputPath: "feed.xml", locale: nil, translations: [:], generatedPages: [:]))
+    XCTAssertEqual(entryCount(mixedFeed), 2)
+    XCTAssertFalse(mixedFeed.contains("<title>Old</title>"))
+  }
+
+  func testAtomFeedOfMixedItemTypes() throws {
+    let context = PageRenderingContext(
+      allItems: [
+        Item(title: "Old article", body: "<p>old</p>", date: Date(timeIntervalSince1970: 1_704_106_800), metadata: TaggedMetadata(tags: ["swift"])),
+        Item(title: "New article", body: "<p>new</p>", date: Date(timeIntervalSince1970: 1_735_729_200), metadata: TaggedMetadata(tags: [])),
+        Item(title: "Middle photo", body: "<img>", date: Date(timeIntervalSince1970: 1_720_000_000), metadata: EmptyMetadata()),
+      ],
+      outputPath: "feed.xml",
+      locale: nil,
+      translations: [:],
+      generatedPages: [:]
+    )
+
+    func entryTitles(_ feed: String) -> [String] {
+      feed.components(separatedBy: "<entry>").dropFirst().compactMap {
+        $0.components(separatedBy: "<title>").dropFirst().first?.components(separatedBy: "</title>").first
+      }
+    }
+
+    // By default the filtered items are sorted newest first by `date`.
+    let defaultFeed = Saga.atomFeed(
+      title: "Test Site",
+      baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+      filter: { _ in true },
+      summary: { ($0 as? Item<TaggedMetadata>)?.metadata.tags.first },
+      date: \.date
+    )(context)
+    XCTAssertEqual(entryTitles(defaultFeed), ["New article", "Middle photo", "Old article"])
+    XCTAssertTrue(defaultFeed.contains("<summary>swift</summary>"))
+    XCTAssertTrue(defaultFeed.contains("<updated>2025-01-01T11:00:00Z</updated>"))
+
+    // filter picks the items, sorting overrides the order.
+    let customFeed = Saga.atomFeed(
+      title: "Test Site",
+      baseURL: try XCTUnwrap(URL(string: "https://example.com")),
+      filter: { $0 is Item<TaggedMetadata> },
+      sorting: { $0.date < $1.date }
+    )(context)
+    XCTAssertEqual(entryTitles(customFeed), ["Old article", "New article"])
   }
 
   func testFilesCreatedDuringTheBuildAreRead() async throws {
